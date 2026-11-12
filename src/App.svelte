@@ -2,21 +2,37 @@
   import { onMount } from "svelte";
   import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { relaunch } from "@tauri-apps/plugin-process";
+  import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
+  import { getVersion } from "@tauri-apps/api/app";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { listen } from "@tauri-apps/api/event";
   import { api } from "./lib/api";
   import { formatDuration, formatTimestamp, parseTimestamp } from "./lib/time";
   import { parseChapterPaste, type PastePreview } from "./lib/paste";
+  import {
+    initialTrackSelection,
+    mappingFromSelection,
+    selectionForRange
+  } from "./lib/trackSelection";
   import type {
     ChapterDocument,
     ChapterEntry,
     Edition,
+    AudioStream,
+    FlacExtractionPlan,
+    FlacFallbackMetadata,
+    FlacProbe,
+    FlacProgress,
     MediumTracklist,
     ReleaseCandidate,
     ReleaseDetails,
     SaveProgress,
     ToolStatus
   } from "./lib/types";
+
+  const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000;
+  const UPDATE_CHECK_KEY = "music-chapter-editor.last-update-check";
 
   let tools: ToolStatus | null = null;
   let chapterDocument: ChapterDocument | null = null;
@@ -31,6 +47,15 @@
   let future: ChapterDocument[] = [];
   let customToolPath = "";
 
+  let appVersion = "0.2.0";
+  let showUpdate = false;
+  let updateAvailable: Update | null = null;
+  let updateChecking = false;
+  let updateInstalling = false;
+  let updateMessage = "";
+  let updateDownloaded = 0;
+  let updateTotal = 0;
+
   let showPaste = false;
   let pasteText = "";
   let pastePreview: PastePreview = parseChapterPaste("");
@@ -43,7 +68,12 @@
   let mbResults: ReleaseCandidate[] = [];
   let mbDetails: ReleaseDetails | null = null;
   let mbMedium: MediumTracklist | null = null;
+  let selectedTracks: boolean[] = [];
   let trackMapping: Array<number | null> = [];
+  let trackRangeStart = 1;
+  let trackRangeEnd = 1;
+  let selectedTrackCount = 0;
+  let mappedTrackCount = 0;
   let mbSearching = false;
 
   let showSave = false;
@@ -51,14 +81,40 @@
   let copyDestination = "";
   let saveProgress: SaveProgress | null = null;
 
+  let showFlac = false;
+  let flacProbe: FlacProbe | null = null;
+  let flacStreamIndex = -1;
+  let selectedAudioStream: AudioStream | null = null;
+  let flacOutputParent = "";
+  let flacFallback: FlacFallbackMetadata = {
+    albumArtist: "",
+    album: "",
+    releaseYear: "",
+    originalYear: "",
+    label: "",
+    catalogNumber: ""
+  };
+  let flacPlan: FlacExtractionPlan | null = null;
+  let flacProgress: FlacProgress | null = null;
+  let flacPreviewing = false;
+
   $: activeEdition = chapterDocument
     ? chapterDocument.editions[chapterDocument.activeEdition] ?? null
     : null;
   $: pastePreview = parseChapterPaste(pasteText);
+  $: selectedTrackCount = selectedTracks.filter(Boolean).length;
+  $: mappedTrackCount = trackMapping.filter((value) => value !== null).length;
+  $: selectedAudioStream = flacProbe?.streams.find((stream) => stream.index === flacStreamIndex) ?? null;
 
   onMount(() => {
     void refreshTools();
     const cleanup: Array<() => void> = [];
+    void getVersion().then((version) => (appVersion = version)).catch(() => undefined);
+    const lastCheck = Number(localStorage.getItem(UPDATE_CHECK_KEY) ?? "0");
+    if (!Number.isFinite(lastCheck) || Date.now() - lastCheck >= UPDATE_CHECK_INTERVAL) {
+      const updateTimer = window.setTimeout(() => void checkForAppUpdate(false), 5000);
+      cleanup.push(() => window.clearTimeout(updateTimer));
+    }
     void getCurrentWindow()
       .onDragDropEvent((event) => {
         if (event.payload.type === "drop") {
@@ -69,6 +125,9 @@
       .then((unlisten) => cleanup.push(unlisten));
     void listen<SaveProgress>("save-progress", (event) => {
       saveProgress = event.payload;
+    }).then((unlisten) => cleanup.push(unlisten));
+    void listen<FlacProgress>("flac-progress", (event) => {
+      flacProgress = event.payload;
     }).then((unlisten) => cleanup.push(unlisten));
     return () => cleanup.forEach((unlisten) => unlisten());
   });
@@ -86,6 +145,69 @@
   function clearMessages() {
     errorMessage = "";
     noticeMessage = "";
+  }
+
+  async function checkForAppUpdate(showWhenCurrent = true) {
+    if (updateChecking || updateInstalling) return;
+    if (showWhenCurrent) showUpdate = true;
+    updateChecking = true;
+    updateMessage = "Checking GitHub for a signed update…";
+    updateDownloaded = 0;
+    updateTotal = 0;
+    if (updateAvailable) {
+      await updateAvailable.close();
+      updateAvailable = null;
+    }
+    try {
+      const candidate = await checkForUpdate({ timeout: 15_000 });
+      localStorage.setItem(UPDATE_CHECK_KEY, String(Date.now()));
+      if (candidate) {
+        updateAvailable = candidate;
+        showUpdate = true;
+        updateMessage = `Version ${candidate.version} is ready to install.`;
+      } else {
+        updateMessage = `Music Chapter Editor ${appVersion} is up to date.`;
+      }
+    } catch (error) {
+      if (showWhenCurrent) {
+        showUpdate = true;
+        updateMessage = `Could not check for updates: ${describeError(error)}`;
+      }
+    } finally {
+      updateChecking = false;
+    }
+  }
+
+  async function installAppUpdate() {
+    if (!updateAvailable || updateInstalling) return;
+    if (dirty && !window.confirm("Installing the update restarts the app and discards unsaved chapter edits. Continue?")) return;
+    updateInstalling = true;
+    updateMessage = "Downloading and verifying the signed update…";
+    updateDownloaded = 0;
+    updateTotal = 0;
+    try {
+      await updateAvailable.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          updateTotal = event.data.contentLength ?? 0;
+          updateDownloaded = 0;
+        } else if (event.event === "Progress") {
+          updateDownloaded += event.data.chunkLength;
+        } else if (event.event === "Finished") {
+          updateMessage = "Update installed. Restarting Music Chapter Editor…";
+        }
+      });
+      await relaunch();
+    } catch (error) {
+      updateMessage = `The update was not installed: ${describeError(error)}`;
+      updateInstalling = false;
+    }
+  }
+
+  async function closeUpdateDialog() {
+    if (updateChecking || updateInstalling) return;
+    showUpdate = false;
+    if (updateAvailable) await updateAvailable.close();
+    updateAvailable = null;
   }
 
   function fail(error: unknown) {
@@ -242,6 +364,7 @@
       sourceIndex: null
     };
     activeEdition.chapters.splice(insertAt, 0, chapter);
+    chapterDocument!.musicbrainzSelection = null;
     selectedChapter = insertAt;
     changed();
   }
@@ -250,6 +373,7 @@
     if (!activeEdition || selectedChapter < 0 || chapterDocument?.advanced) return;
     checkpoint();
     activeEdition.chapters.splice(selectedChapter, 1);
+    chapterDocument!.musicbrainzSelection = null;
     selectedChapter = Math.min(selectedChapter, activeEdition.chapters.length - 1);
     changed();
   }
@@ -265,6 +389,7 @@
       activeEdition.chapters[selectedChapter]
     ];
     activeEdition.chapters.forEach((chapter, index) => Object.assign(chapter, timeline[index]));
+    chapterDocument!.musicbrainzSelection = null;
     selectedChapter = target;
     changed();
   }
@@ -307,6 +432,7 @@
     chapterDocument.advanced = result.advanced;
     chapterDocument.advancedReason = result.advancedReason;
     chapterDocument.originalXml = result.originalXml;
+    chapterDocument.musicbrainzSelection = null;
     selectedChapter = result.editions[0]?.chapters.length ? 0 : -1;
     changed();
     noticeMessage = "Imported chapter XML. Save to apply it to the MKV.";
@@ -353,6 +479,7 @@
         };
       });
     }
+    chapterDocument.musicbrainzSelection = null;
     selectedChapter = activeEdition.chapters.length ? 0 : -1;
     changed();
     showPaste = false;
@@ -366,6 +493,7 @@
     mbResults = [];
     mbDetails = null;
     mbMedium = null;
+    selectedTracks = [];
     trackMapping = [];
     showMusicBrainz = true;
   }
@@ -385,6 +513,8 @@
       });
       mbDetails = null;
       mbMedium = null;
+      selectedTracks = [];
+      trackMapping = [];
       if (!mbResults.length) fail("MusicBrainz found no matching releases.");
     } catch (error) {
       fail(error);
@@ -399,6 +529,7 @@
     try {
       mbDetails = await api.loadRelease(release.id);
       mbMedium = null;
+      selectedTracks = [];
       trackMapping = [];
     } catch (error) {
       fail(error);
@@ -409,9 +540,60 @@
 
   function chooseMedium(medium: MediumTracklist) {
     mbMedium = medium;
-    trackMapping = activeEdition
-      ? activeEdition.chapters.map((_, index) => (index < medium.tracks.length ? index : null))
-      : [];
+    const chapterCount = activeEdition?.chapters.length ?? 0;
+    selectedTracks = initialTrackSelection(medium.tracks.length, chapterCount);
+    trackMapping = mappingFromSelection(selectedTracks, chapterCount);
+    trackRangeStart = 1;
+    trackRangeEnd = Math.min(medium.tracks.length, Math.max(1, chapterCount));
+  }
+
+  function backToMediums() {
+    mbMedium = null;
+    selectedTracks = [];
+    trackMapping = [];
+  }
+
+  function applyTrackSelection(selection: boolean[]) {
+    selectedTracks = selection;
+    trackMapping = mappingFromSelection(selection, activeEdition?.chapters.length ?? 0);
+  }
+
+  function toggleTrackSelection(trackIndex: number, included: boolean) {
+    const selection = [...selectedTracks];
+    selection[trackIndex] = included;
+    applyTrackSelection(selection);
+  }
+
+  function selectAllTracks() {
+    if (!mbMedium) return;
+    applyTrackSelection(Array(mbMedium.tracks.length).fill(true));
+  }
+
+  function clearTrackSelection() {
+    if (!mbMedium) return;
+    applyTrackSelection(Array(mbMedium.tracks.length).fill(false));
+  }
+
+  function selectTrackRange() {
+    if (!mbMedium) return;
+    if (
+      !Number.isInteger(trackRangeStart) ||
+      !Number.isInteger(trackRangeEnd) ||
+      trackRangeStart < 1 ||
+      trackRangeEnd < trackRangeStart ||
+      trackRangeEnd > mbMedium.tracks.length
+    ) {
+      fail(`Choose a range between 1 and ${mbMedium.tracks.length}.`);
+      return;
+    }
+    clearMessages();
+    applyTrackSelection(
+      selectionForRange(mbMedium.tracks.length, trackRangeStart, trackRangeEnd)
+    );
+  }
+
+  function remapSelectedTracks() {
+    trackMapping = mappingFromSelection(selectedTracks, activeEdition?.chapters.length ?? 0);
   }
 
   function setMapping(chapterIndex: number, value: string) {
@@ -424,7 +606,7 @@
   }
 
   async function applyMapping() {
-    if (!chapterDocument || !activeEdition || !mbMedium) return;
+    if (!chapterDocument || !activeEdition || !mbMedium || !mbDetails) return;
     const used = trackMapping.filter((value): value is number => value !== null);
     if (new Set(used).size !== used.length) {
       fail("Each MusicBrainz track can be mapped only once.");
@@ -436,6 +618,36 @@
       api.applyTrackMapping(chapterDocument!, chapterDocument!.activeEdition, titles)
     );
     if (result) {
+      result.musicbrainzSelection = {
+        releaseId: mbDetails!.id,
+        releaseGroupId: mbDetails!.releaseGroupId,
+        releaseTitle: mbDetails!.title,
+        albumArtist: mbDetails!.artistCredit,
+        albumArtistIds: mbDetails!.artistIds,
+        releaseDate: mbDetails!.date,
+        originalYear: mbDetails!.originalYear,
+        label: mbDetails!.label,
+        catalogNumber: mbDetails!.catalogNumber,
+        mediumPosition: mbMedium.position,
+        mediumTitle: mbMedium.title,
+        mediumTrackCount: mbMedium.tracks.length,
+        totalMedia: mbDetails!.media.length,
+        chapterTracks: trackMapping.map((index) => {
+          if (index === null) return null;
+          const track = mbMedium!.tracks[index];
+          return track
+            ? {
+                trackId: track.id,
+                recordingId: track.recordingId,
+                position: track.position,
+                number: track.number,
+                title: track.title,
+                artistCredit: track.artistCredit || mbDetails!.artistCredit,
+                artistIds: track.artistIds.length ? track.artistIds : mbDetails!.artistIds
+              }
+            : null;
+        })
+      };
       chapterDocument = result;
       dirty = true;
       showMusicBrainz = false;
@@ -487,6 +699,89 @@
 
   async function cancelSave() {
     await api.cancelSave();
+  }
+
+  async function openFlacDialog() {
+    if (!chapterDocument || !activeEdition || chapterDocument.advanced) return;
+    const selection = chapterDocument.musicbrainzSelection;
+    flacFallback = {
+      albumArtist: selection?.albumArtist || chapterDocument.inferredArtist,
+      album: selection?.releaseTitle || chapterDocument.inferredRelease,
+      releaseYear: selection?.releaseDate?.slice(0, 4) ?? "",
+      originalYear: selection?.originalYear ?? "",
+      label: selection?.label ?? "",
+      catalogNumber: selection?.catalogNumber ?? ""
+    };
+    flacOutputParent = "";
+    flacPlan = null;
+    flacProgress = null;
+    const result = await withBusy("Inspecting audio streams…", () => api.probeFlac(chapterDocument!.path));
+    if (!result) return;
+    flacProbe = result;
+    if (!result.available) {
+      fail(result.message);
+      return;
+    }
+    if (!result.streams.length) {
+      fail("This MKV does not contain an audio stream.");
+      return;
+    }
+    flacStreamIndex = (result.streams.find((stream) => stream.isDefault) ?? result.streams[0]).index;
+    showFlac = true;
+    await refreshFlacPreview();
+  }
+
+  function flacRequest() {
+    if (!chapterDocument || !selectedAudioStream) return null;
+    return {
+      document: chapterDocument,
+      stream: selectedAudioStream,
+      outputParent: flacOutputParent,
+      fallback: flacFallback
+    };
+  }
+
+  async function refreshFlacPreview() {
+    const request = flacRequest();
+    if (!request) return;
+    flacPreviewing = true;
+    clearMessages();
+    try {
+      flacPlan = await api.previewFlac(request);
+    } catch (error) {
+      flacPlan = null;
+      fail(error);
+    } finally {
+      flacPreviewing = false;
+    }
+  }
+
+  async function chooseFlacOutputParent() {
+    const path = await openDialog({ directory: true, multiple: false, title: "Choose FLAC output folder" });
+    if (typeof path === "string") flacOutputParent = path;
+  }
+
+  async function performFlacExtraction() {
+    const request = flacRequest();
+    if (!request || !flacOutputParent) {
+      fail("Choose an output folder before extracting.");
+      return;
+    }
+    if (!flacPlan) await refreshFlacPreview();
+    if (!flacPlan) return;
+    showFlac = false;
+    flacProgress = { phase: "extracting", completed: 0, total: flacPlan.tracks.length, filename: "" };
+    const result = await withBusy("Extracting and verifying FLAC tracks…", () => api.extractFlac(request));
+    flacProgress = null;
+    if (result) {
+      noticeMessage = `Extracted and verified ${result.files.length} FLAC files in ${result.outputDirectory}.${
+        result.warnings.length ? ` Warnings: ${result.warnings.join(" ")}` : ""
+      }`;
+    }
+  }
+
+  async function cancelFlacExtraction() {
+    await api.cancelFlac();
   }
 
   async function restoreRecovery() {
@@ -573,6 +868,7 @@
         <button disabled={!chapterDocument || chapterDocument.advanced} on:click={openMusicBrainzDialog}>MusicBrainz</button>
       </div>
       <div class="toolbar-spacer"></div>
+      <button disabled={!chapterDocument || chapterDocument.advanced || !activeEdition?.chapters.length} on:click={openFlacDialog}>Extract FLAC…</button>
       <button disabled={!chapterDocument} on:click={restoreRecovery}>Restore…</button>
       <button class="save-button" disabled={!chapterDocument || chapterDocument.advanced} on:click={openSaveDialog}>
         Save chapters
@@ -654,9 +950,47 @@
 
   <footer>
     <span>{chapterDocument ? (dirty ? "Unsaved edits" : "Saved state") : "Local-first · no media upload"}</span>
-    <span>{tools?.directory ?? "MKVToolNix not configured"}</span>
+    <span class="footer-tools">
+      <button class:update-ready={!!updateAvailable} disabled={updateChecking || updateInstalling} on:click={() => checkForAppUpdate(true)}>
+        {updateChecking ? "Checking…" : updateAvailable ? `Update ${updateAvailable.version}` : `v${appVersion} · Check for updates`}
+      </button>
+      <span>{tools?.directory ?? "MKVToolNix not configured"}</span>
+    </span>
   </footer>
 </div>
+
+{#if showUpdate}
+  <div class="modal-backdrop" role="presentation">
+    <dialog open class="modal update-modal" aria-labelledby="update-title">
+      <div class="modal-heading">
+        <div><p class="eyebrow">SIGNED APPLICATION UPDATE</p><h2 id="update-title">{updateAvailable ? `Update to ${updateAvailable.version}` : "Application updates"}</h2></div>
+        <button class="close" disabled={updateChecking || updateInstalling} on:click={closeUpdateDialog}>×</button>
+      </div>
+      <div class="update-content">
+        <p class:update-error={updateMessage.startsWith("Could not") || updateMessage.startsWith("The update")}>{updateMessage}</p>
+        {#if updateAvailable?.body}<div class="release-notes"><strong>What’s new</strong><p>{updateAvailable.body}</p></div>{/if}
+        {#if updateInstalling}
+          <div class="update-progress">
+            <progress value={updateDownloaded} max={Math.max(1, updateTotal)}></progress>
+            <span>{updateTotal ? `${Math.min(100, Math.round((updateDownloaded / updateTotal) * 100))}%` : "Working…"}</span>
+          </div>
+        {/if}
+        <small>Updates come from this project’s public GitHub release and are cryptographically verified before installation. The app remains ad-hoc signed and not Apple-notarized.</small>
+      </div>
+      <div class="modal-actions update-actions">
+        <span>Installed version {appVersion}</span>
+        <div>
+          <button disabled={updateChecking || updateInstalling} on:click={closeUpdateDialog}>Not now</button>
+          {#if updateAvailable}
+            <button class="primary" disabled={updateInstalling} on:click={installAppUpdate}>{updateInstalling ? "Installing…" : "Install and restart"}</button>
+          {:else}
+            <button class="primary" disabled={updateChecking} on:click={() => checkForAppUpdate(true)}>{updateChecking ? "Checking…" : "Check again"}</button>
+          {/if}
+        </div>
+      </div>
+    </dialog>
+  </div>
+{/if}
 
 {#if showPaste}
   <div class="modal-backdrop" role="presentation">
@@ -692,14 +1026,39 @@
 
       <div class="music-content">
         {#if mbMedium && mbDetails}
-          <div class="mapping-heading"><button class="back-button" on:click={() => (mbMedium = null)}>← Mediums</button><div><strong>{mbDetails.artistCredit} — {mbDetails.title}</strong><span>{mbMedium.format ?? "Unknown format"} · {mbMedium.tracks.length} tracks</span></div></div>
-          <div class="mapping-grid">
-            <div class="mapping-labels"><span>MKV chapter</span><span>MusicBrainz title</span></div>
-            {#each activeEdition?.chapters ?? [] as chapter, index}
-              <div class="mapping-row"><div><b>{index + 1}</b><span>{chapter.title || "Untitled"}</span></div><select value={trackMapping[index] ?? ""} on:change={(event) => setMapping(index, event.currentTarget.value)}><option value="">Keep current title</option>{#each mbMedium.tracks as track, trackIndex}<option value={trackIndex} disabled={trackUsedElsewhere(trackIndex, index)}>{track.number || track.position}. {track.title}{track.lengthMs ? ` · ${formatDuration(track.lengthMs * 1_000_000)}` : ""}</option>{/each}</select></div>
-            {/each}
+          <div class="mapping-heading"><button class="back-button" on:click={backToMediums}>← Mediums</button><div><strong>{mbDetails.artistCredit} — {mbDetails.title}</strong><span>{mbMedium.format ?? "Unknown format"} · select the titles belonging to this MKV</span></div></div>
+          <div class="track-mapping-layout">
+            <section class="track-picker" aria-label="MusicBrainz track selection">
+              <div class="track-picker-heading">
+                <div><strong>1. Select this file’s titles</strong><span>{selectedTrackCount} of {mbMedium.tracks.length} selected</span></div>
+                <div><button on:click={selectAllTracks}>All</button><button on:click={clearTrackSelection}>Clear</button></div>
+              </div>
+              <div class="range-picker">
+                <label>From<input type="number" min="1" max={mbMedium.tracks.length} bind:value={trackRangeStart} /></label>
+                <label>Through<input type="number" min="1" max={mbMedium.tracks.length} bind:value={trackRangeEnd} /></label>
+                <button on:click={selectTrackRange}>Select range</button>
+              </div>
+              <div class="track-list">
+                {#each mbMedium.tracks as track, trackIndex}
+                  <label class:selected={selectedTracks[trackIndex]}>
+                    <input type="checkbox" checked={selectedTracks[trackIndex] ?? false} on:change={(event) => toggleTrackSelection(trackIndex, event.currentTarget.checked)} />
+                    <b>{track.number || track.position}</b>
+                    <span><strong>{track.title}</strong>{#if track.lengthMs}<small>{formatDuration(track.lengthMs * 1_000_000)}</small>{/if}</span>
+                  </label>
+                {/each}
+              </div>
+            </section>
+            <section class="mapping-panel" aria-label="Chapter title mapping">
+              <div class="mapping-panel-heading"><div><strong>2. Review the mapping</strong><span>Selected titles map in order; override any row.</span></div><button disabled={!selectedTrackCount} on:click={remapSelectedTracks}>Map in order</button></div>
+              <div class="mapping-grid">
+                <div class="mapping-labels"><span>MKV chapter</span><span>Selected MusicBrainz title</span></div>
+                {#each activeEdition?.chapters ?? [] as chapter, index}
+                  <div class="mapping-row"><div><b>{index + 1}</b><span>{chapter.title || "Untitled"}</span></div><select value={trackMapping[index] ?? ""} on:change={(event) => setMapping(index, event.currentTarget.value)}><option value="">Keep current title</option>{#each mbMedium.tracks as track, trackIndex}{#if selectedTracks[trackIndex]}<option value={trackIndex} disabled={trackUsedElsewhere(trackIndex, index)}>{track.number || track.position}. {track.title}{track.lengthMs ? ` · ${formatDuration(track.lengthMs * 1_000_000)}` : ""}</option>{/if}{/each}</select></div>
+                {/each}
+              </div>
+            </section>
           </div>
-          <div class="mapping-summary"><span>{trackMapping.filter((value) => value !== null).length} mapped</span><span>{mbMedium.tracks.length - new Set(trackMapping.filter((value) => value !== null)).size} unused tracks</span></div>
+          <div class="mapping-summary"><span>{mappedTrackCount} of {activeEdition?.chapters.length ?? 0} chapters mapped</span><span>{selectedTrackCount - new Set(trackMapping.filter((value) => value !== null)).size} selected titles unused</span><span>{mbMedium.tracks.length - selectedTrackCount} other titles excluded from this file</span></div>
         {:else if mbDetails}
           <div class="mapping-heading"><button class="back-button" on:click={() => (mbDetails = null)}>← Results</button><div><strong>{mbDetails.artistCredit} — {mbDetails.title}</strong><span>Choose the disc or medium that matches this MKV.</span></div></div>
           <div class="medium-list">{#each mbDetails.media as medium}<button on:click={() => chooseMedium(medium)}><div><b>{medium.position}</b><span><strong>{medium.title || `Medium ${medium.position}`}</strong><small>{medium.format ?? "Unknown format"}</small></span></div><em>{medium.tracks.length} tracks →</em></button>{/each}</div>
@@ -709,7 +1068,60 @@
           <div class="music-empty"><span>♫</span><h3>Search MusicBrainz releases</h3><p>Nothing is applied until you choose a release, select its medium, review every mapping, and press Apply.</p></div>
         {/if}
       </div>
-      <div class="modal-actions"><button on:click={() => (showMusicBrainz = false)}>Cancel</button>{#if mbMedium}<button class="primary" on:click={applyMapping}>Apply mapped titles</button>{/if}</div>
+      <div class="modal-actions"><button on:click={() => (showMusicBrainz = false)}>Cancel</button>{#if mbMedium}<button class="primary" disabled={mappedTrackCount === 0} on:click={applyMapping}>Apply mapped titles</button>{/if}</div>
+    </dialog>
+  </div>
+{/if}
+
+{#if showFlac && chapterDocument && flacProbe}
+  <div class="modal-backdrop" role="presentation">
+    <dialog open class="modal flac-modal" aria-labelledby="flac-title">
+      <div class="modal-heading">
+        <div><p class="eyebrow">LOSSLESS AUDIO EXPORT</p><h2 id="flac-title">Extract chapters as FLAC</h2></div>
+        <button class="close" on:click={() => (showFlac = false)}>×</button>
+      </div>
+      <div class="flac-content">
+        <section>
+          <div class="section-heading"><strong>1. Audio stream</strong><span>Only the selected stream is decoded. The MKV is never changed.</span></div>
+          <div class="audio-streams">
+            {#each flacProbe.streams as stream}
+              <label class:selected={flacStreamIndex === stream.index}>
+                <input type="radio" bind:group={flacStreamIndex} value={stream.index} on:change={refreshFlacPreview} />
+                <span><strong>{stream.title || stream.codecLongName || stream.codec}</strong><small>{[stream.language, stream.channelLayout || `${stream.channels} channels`, stream.sampleRate ? `${stream.sampleRate / 1000} kHz` : null, stream.bitDepth ? `${stream.bitDepth}-bit` : null, stream.isDefault ? "default" : null].filter(Boolean).join(" · ")}</small></span>
+              </label>
+            {/each}
+          </div>
+        </section>
+
+        <section>
+          <div class="section-heading"><strong>2. Album metadata</strong><span>{chapterDocument.musicbrainzSelection ? "From the selected MusicBrainz release and track mapping" : "Editable fallback metadata"}</span></div>
+          {#if chapterDocument.musicbrainzSelection}
+            <aside class="metadata-source">MusicBrainz metadata is authoritative for this export. “Keep current” chapter rows still use their chapter title.</aside>
+          {/if}
+          <div class="metadata-grid">
+            <label>Album artist<input bind:value={flacFallback.albumArtist} disabled={!!chapterDocument.musicbrainzSelection} /></label>
+            <label>Album<input bind:value={flacFallback.album} disabled={!!chapterDocument.musicbrainzSelection} /></label>
+            <label>Original year<input bind:value={flacFallback.originalYear} disabled={!!chapterDocument.musicbrainzSelection} /></label>
+            <label>Release year<input bind:value={flacFallback.releaseYear} disabled={!!chapterDocument.musicbrainzSelection} /></label>
+            <label>Label<input bind:value={flacFallback.label} disabled={!!chapterDocument.musicbrainzSelection} /></label>
+            <label>Catalog number<input bind:value={flacFallback.catalogNumber} disabled={!!chapterDocument.musicbrainzSelection} /></label>
+          </div>
+          {#if !chapterDocument.musicbrainzSelection}<button class="refresh-preview" disabled={flacPreviewing} on:click={refreshFlacPreview}>{flacPreviewing ? "Updating…" : "Update naming preview"}</button>{/if}
+        </section>
+
+        <section>
+          <div class="section-heading"><strong>3. Destination and preview</strong><span>Picard Preset 3, plus the selected stream’s channel count</span></div>
+          <label class="flac-destination">Output parent folder<div><input readonly value={flacOutputParent} placeholder="Choose where the Album Artist folder will be created" /><button on:click={chooseFlacOutputParent}>Choose…</button></div></label>
+          {#if flacPlan}
+            <div class="naming-preview">
+              <code>{flacPlan.albumDirectory}/</code>
+              <div>{#each flacPlan.tracks as track}<span><b>{track.chapterIndex + 1}</b><code>{track.relativePath.split("/").slice(-1)[0]}</code><small>{formatDuration(track.endNs - track.startNs)}</small></span>{/each}</div>
+            </div>
+            {#if flacPlan.warnings.length}<aside class="flac-warnings">{flacPlan.warnings.join(" ")}</aside>{/if}
+          {/if}
+        </section>
+      </div>
+      <div class="modal-actions"><span class="flac-tool">{flacProbe.version ?? flacProbe.message}</span><button on:click={() => (showFlac = false)}>Cancel</button><button class="primary" disabled={!flacOutputParent || !flacPlan || flacPreviewing} on:click={performFlacExtraction}>Extract {flacPlan?.tracks.length ?? 0} tracks</button></div>
     </dialog>
   </div>
 {/if}
@@ -730,5 +1142,5 @@
 {/if}
 
 {#if busy}
-  <div class="busy-overlay" aria-live="polite"><div class="spinner"></div><strong>{busyLabel}</strong>{#if saveProgress}<progress value={saveProgress.completed} max={Math.max(1, saveProgress.total)}></progress><small>{saveProgress.phase}</small>{#if saveProgress.phase === "copying"}<button on:click={cancelSave}>Cancel</button>{/if}{/if}</div>
+  <div class="busy-overlay" aria-live="polite"><div class="spinner"></div><strong>{busyLabel}</strong>{#if saveProgress}<progress value={saveProgress.completed} max={Math.max(1, saveProgress.total)}></progress><small>{saveProgress.phase}</small>{#if saveProgress.phase === "copying"}<button on:click={cancelSave}>Cancel</button>{/if}{:else if flacProgress}<progress value={flacProgress.completed} max={Math.max(1, flacProgress.total)}></progress><small>{flacProgress.phase} {flacProgress.filename}</small><button on:click={cancelFlacExtraction}>Cancel extraction</button>{/if}</div>
 {/if}

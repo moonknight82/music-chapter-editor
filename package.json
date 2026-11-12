@@ -1,7 +1,7 @@
 {
   "name": "music-chapter-editor",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "repository": "https://github.com/moonknight82/music-chapter-editor",
   "type": "module",
@@ -16,6 +16,8 @@
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-dialog": "^2.4.0",
     "@tauri-apps/plugin-opener": "^2.5.0",
+    "@tauri-apps/plugin-process": "2.3.1",
+    "@tauri-apps/plugin-updater": "2.10.1",
     "svelte": "^5.38.0"
   },
   "devDependencies": {

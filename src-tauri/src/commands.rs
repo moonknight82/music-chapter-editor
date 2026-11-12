@@ -16,8 +16,9 @@ use crate::chapter_xml::{
 };
 use crate::media::{file_identity, open_document};
 use crate::models::{
-    ChapterDocument, ImportedChapters, ReleaseCandidate, ReleaseDetails, SaveMode, SaveProgress,
-    SaveRequest, SaveVerification, SearchRequest, ToolStatus,
+    ChapterDocument, FlacExtractionPlan, FlacExtractionRequest, FlacExtractionResult, FlacProbe,
+    ImportedChapters, ReleaseCandidate, ReleaseDetails, SaveMode, SaveProgress, SaveRequest,
+    SaveVerification, SearchRequest, ToolStatus,
 };
 use crate::tools::{ToolPaths, locate_tools, status};
 
@@ -341,6 +342,8 @@ fn perform_save(
         );
         warnings.extend(run_chapter_write(&tools, &target, xml)?);
         let verified = open_document(&target, &tools)?;
+        let mut verified = verified;
+        verified.musicbrainz_selection = request.document.musicbrainz_selection.clone();
         let matches = if has_chapters(&request.document) {
             semantically_equal(&request.document.editions, &verified.editions)
         } else {
@@ -390,6 +393,48 @@ pub async fn save_chapters(
 #[tauri::command]
 pub fn cancel_save(state: State<'_, AppState>) {
     state.cancel_save.store(true, Ordering::Relaxed);
+}
+
+#[tauri::command]
+pub async fn probe_flac(path: String, state: State<'_, AppState>) -> Result<FlacProbe, String> {
+    let configured = state.tool_directory.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::flac::probe(Path::new(&path), configured.as_deref())
+    })
+    .await
+    .map_err(|error| format!("Audio probe task failed: {error}"))?
+}
+
+#[tauri::command]
+pub fn preview_flac_extraction(
+    request: FlacExtractionRequest,
+) -> Result<FlacExtractionPlan, String> {
+    crate::flac::plan(&request)
+}
+
+#[tauri::command]
+pub async fn extract_flac(
+    request: FlacExtractionRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<FlacExtractionResult, String> {
+    let configured = state.tool_directory.lock().unwrap().clone();
+    let state_inner = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::flac::extract(
+            request,
+            configured.as_deref(),
+            &app,
+            &state_inner.cancel_flac,
+        )
+    })
+    .await
+    .map_err(|error| format!("FLAC extraction task failed: {error}"))?
+}
+
+#[tauri::command]
+pub fn cancel_flac(state: State<'_, AppState>) {
+    state.cancel_flac.store(true, Ordering::Relaxed);
 }
 
 #[tauri::command]

@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ChapterDocument,
+  FlacExtractionPlan,
+  FlacExtractionRequest,
+  FlacExtractionResult,
+  FlacProbe,
   ImportedChapters,
   ReleaseCandidate,
   ReleaseDetails,
@@ -38,5 +42,11 @@ export const api = {
   ) => invoke<SaveVerification>("save_chapters", { request: { document, mode } }),
   cancelSave: () => invoke<void>("cancel_save"),
   restoreRecovery: (targetPath: string, recoveryPath: string) =>
-    invoke<ChapterDocument>("restore_recovery", { targetPath, recoveryPath })
+    invoke<ChapterDocument>("restore_recovery", { targetPath, recoveryPath }),
+  probeFlac: (path: string) => invoke<FlacProbe>("probe_flac", { path }),
+  previewFlac: (request: FlacExtractionRequest) =>
+    invoke<FlacExtractionPlan>("preview_flac_extraction", { request }),
+  extractFlac: (request: FlacExtractionRequest) =>
+    invoke<FlacExtractionResult>("extract_flac", { request }),
+  cancelFlac: () => invoke<void>("cancel_flac")
 };

@@ -1,5 +1,6 @@
 pub mod chapter_xml;
 mod commands;
+mod flac;
 pub mod media;
 pub mod models;
 mod musicbrainz;
@@ -20,6 +21,7 @@ use musicbrainz::MusicBrainzClient;
 pub struct AppState {
     tool_directory: Arc<Mutex<Option<PathBuf>>>,
     cancel_save: Arc<AtomicBool>,
+    cancel_flac: Arc<AtomicBool>,
     musicbrainz: Arc<MusicBrainzClient>,
 }
 
@@ -41,10 +43,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let state = AppState {
                 tool_directory: Arc::new(Mutex::new(load_tool_directory(app))),
                 cancel_save: Arc::new(AtomicBool::new(false)),
+                cancel_flac: Arc::new(AtomicBool::new(false)),
                 musicbrainz: Arc::new(MusicBrainzClient::new()?),
             };
             app.manage(state);
@@ -62,6 +67,10 @@ pub fn run() {
             commands::save_chapters,
             commands::cancel_save,
             commands::restore_recovery,
+            commands::probe_flac,
+            commands::preview_flac_extraction,
+            commands::extract_flac,
+            commands::cancel_flac,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Music Chapter Editor");

@@ -40,6 +40,34 @@ export interface ChapterDocument {
   originalXml: string | null;
   inferredArtist: string;
   inferredRelease: string;
+  musicbrainzSelection: MusicBrainzSelection | null;
+}
+
+export interface MusicBrainzTrackMetadata {
+  trackId: string | null;
+  recordingId: string | null;
+  position: number;
+  number: string;
+  title: string;
+  artistCredit: string;
+  artistIds: string[];
+}
+
+export interface MusicBrainzSelection {
+  releaseId: string;
+  releaseGroupId: string | null;
+  releaseTitle: string;
+  albumArtist: string;
+  albumArtistIds: string[];
+  releaseDate: string | null;
+  originalYear: string | null;
+  label: string | null;
+  catalogNumber: string | null;
+  mediumPosition: number;
+  mediumTitle: string | null;
+  mediumTrackCount: number;
+  totalMedia: number;
+  chapterTracks: Array<MusicBrainzTrackMetadata | null>;
 }
 
 export interface ImportedChapters {
@@ -79,11 +107,14 @@ export interface ReleaseCandidate {
 }
 
 export interface TrackInfo {
+  id: string | null;
   position: number;
   number: string;
   title: string;
   lengthMs: number | null;
   recordingId: string | null;
+  artistCredit: string;
+  artistIds: string[];
 }
 
 export interface MediumTracklist {
@@ -98,7 +129,81 @@ export interface ReleaseDetails {
   id: string;
   title: string;
   artistCredit: string;
+  artistIds: string[];
+  date: string | null;
+  originalYear: string | null;
+  releaseGroupId: string | null;
+  label: string | null;
+  catalogNumber: string | null;
   media: MediumTracklist[];
+}
+
+export interface AudioStream {
+  index: number;
+  codec: string;
+  codecLongName: string;
+  title: string | null;
+  language: string | null;
+  channels: number;
+  channelLayout: string | null;
+  sampleRate: number;
+  bitDepth: number;
+  isDefault: boolean;
+}
+
+export interface FlacProbe {
+  available: boolean;
+  ffmpegPath: string | null;
+  version: string | null;
+  streams: AudioStream[];
+  searched: string[];
+  message: string;
+}
+
+export interface FlacFallbackMetadata {
+  albumArtist: string;
+  album: string;
+  releaseYear: string;
+  originalYear: string;
+  label: string;
+  catalogNumber: string;
+}
+
+export interface FlacExtractionRequest {
+  document: ChapterDocument;
+  stream: AudioStream;
+  outputParent: string;
+  fallback: FlacFallbackMetadata;
+}
+
+export interface FlacTrackPreview {
+  chapterIndex: number;
+  relativePath: string;
+  title: string;
+  artist: string;
+  trackNumber: string;
+  startNs: number;
+  endNs: number;
+}
+
+export interface FlacExtractionPlan {
+  albumDirectory: string;
+  usesMusicbrainz: boolean;
+  tracks: FlacTrackPreview[];
+  warnings: string[];
+}
+
+export interface FlacProgress {
+  phase: string;
+  completed: number;
+  total: number;
+  filename: string;
+}
+
+export interface FlacExtractionResult {
+  outputDirectory: string;
+  files: string[];
+  warnings: string[];
 }
 
 export interface SaveVerification {

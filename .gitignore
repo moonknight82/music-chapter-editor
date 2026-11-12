@@ -5,3 +5,6 @@ src-tauri/target/
 *.log
 .vite/
 coverage/
+.private/
+outputs/
+release-artifacts/

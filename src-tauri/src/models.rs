@@ -52,6 +52,41 @@ pub struct ChapterDocument {
     pub original_xml: Option<String>,
     pub inferred_artist: String,
     pub inferred_release: String,
+    #[serde(default)]
+    pub musicbrainz_selection: Option<MusicBrainzSelection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusicBrainzTrackMetadata {
+    pub track_id: Option<String>,
+    pub recording_id: Option<String>,
+    pub position: u32,
+    pub number: String,
+    pub title: String,
+    pub artist_credit: String,
+    #[serde(default)]
+    pub artist_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusicBrainzSelection {
+    pub release_id: String,
+    pub release_group_id: Option<String>,
+    pub release_title: String,
+    pub album_artist: String,
+    #[serde(default)]
+    pub album_artist_ids: Vec<String>,
+    pub release_date: Option<String>,
+    pub original_year: Option<String>,
+    pub label: Option<String>,
+    pub catalog_number: Option<String>,
+    pub medium_position: u32,
+    pub medium_title: Option<String>,
+    pub medium_track_count: u32,
+    pub total_media: u32,
+    pub chapter_tracks: Vec<Option<MusicBrainzTrackMetadata>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,11 +136,15 @@ pub struct ReleaseCandidate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackInfo {
+    pub id: Option<String>,
     pub position: u32,
     pub number: String,
     pub title: String,
     pub length_ms: Option<u64>,
     pub recording_id: Option<String>,
+    pub artist_credit: String,
+    #[serde(default)]
+    pub artist_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,7 +163,98 @@ pub struct ReleaseDetails {
     pub id: String,
     pub title: String,
     pub artist_credit: String,
+    #[serde(default)]
+    pub artist_ids: Vec<String>,
+    pub date: Option<String>,
+    pub original_year: Option<String>,
+    pub release_group_id: Option<String>,
+    pub label: Option<String>,
+    pub catalog_number: Option<String>,
     pub media: Vec<MediumTracklist>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioStream {
+    pub index: u32,
+    pub codec: String,
+    pub codec_long_name: String,
+    pub title: Option<String>,
+    pub language: Option<String>,
+    pub channels: u32,
+    pub channel_layout: Option<String>,
+    pub sample_rate: u32,
+    pub bit_depth: u32,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlacProbe {
+    pub available: bool,
+    pub ffmpeg_path: Option<String>,
+    pub version: Option<String>,
+    pub streams: Vec<AudioStream>,
+    pub searched: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlacFallbackMetadata {
+    pub album_artist: String,
+    pub album: String,
+    pub release_year: String,
+    pub original_year: String,
+    pub label: String,
+    pub catalog_number: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlacExtractionRequest {
+    pub document: ChapterDocument,
+    pub stream: AudioStream,
+    pub output_parent: String,
+    pub fallback: FlacFallbackMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlacTrackPreview {
+    pub chapter_index: usize,
+    pub relative_path: String,
+    pub title: String,
+    pub artist: String,
+    pub track_number: String,
+    pub start_ns: u64,
+    pub end_ns: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlacExtractionPlan {
+    pub album_directory: String,
+    pub uses_musicbrainz: bool,
+    pub tracks: Vec<FlacTrackPreview>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlacProgress {
+    pub phase: String,
+    pub completed: usize,
+    pub total: usize,
+    pub filename: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlacExtractionResult {
+    pub output_directory: String,
+    pub files: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

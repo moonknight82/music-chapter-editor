@@ -1,6 +1,6 @@
 [package]
 name = "music-chapter-editor"
-version = "0.1.0"
+version = "0.2.0"
 description = "A focused Matroska chapter editor with MusicBrainz lookup"
 authors = ["Music Chapter Editor contributors"]
 license = "MIT"
@@ -19,6 +19,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-process = "2.3.1"
+tauri-plugin-updater = "=2.10.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 xmltree = "0.11"
@@ -37,3 +39,15 @@ libc = "0.2"
 
 [dev-dependencies]
 pretty_assertions = "1"
+
+# This macOS Rust/ld toolchain can produce malformed optimized proc-macro
+# artifacts during Apple-silicon Tauri packaging. Chapter and media work is
+# performed by MKVToolNix, so a checked, unoptimized application binary is an
+# acceptable packaging workaround.
+[profile.release]
+opt-level = 0
+debug = true
+debug-assertions = true
+overflow-checks = true
+incremental = true
+codegen-units = 256

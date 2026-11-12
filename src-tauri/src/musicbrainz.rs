@@ -34,15 +34,24 @@ struct ArtistCredit {
     name: String,
     #[serde(default)]
     joinphrase: String,
+    artist: Option<MbArtist>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MbArtist {
+    id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct MbRecording {
     id: Option<String>,
+    #[serde(rename = "artist-credit", default)]
+    artist_credit: Vec<ArtistCredit>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct MbTrack {
+    id: Option<String>,
     #[serde(default)]
     position: u32,
     #[serde(default)]
@@ -51,6 +60,27 @@ struct MbTrack {
     title: String,
     length: Option<u64>,
     recording: Option<MbRecording>,
+    #[serde(rename = "artist-credit", default)]
+    artist_credit: Vec<ArtistCredit>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MbReleaseGroup {
+    id: Option<String>,
+    #[serde(rename = "first-release-date")]
+    first_release_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MbLabel {
+    name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MbLabelInfo {
+    #[serde(rename = "catalog-number")]
+    catalog_number: Option<String>,
+    label: Option<MbLabel>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -77,6 +107,10 @@ struct MbRelease {
     score: Option<u32>,
     #[serde(rename = "artist-credit", default)]
     artist_credit: Vec<ArtistCredit>,
+    #[serde(rename = "release-group")]
+    release_group: Option<MbReleaseGroup>,
+    #[serde(rename = "label-info", default)]
+    label_info: Vec<MbLabelInfo>,
     #[serde(default)]
     media: Vec<MbMedium>,
 }
@@ -86,6 +120,13 @@ fn artist_credit(credit: &[ArtistCredit]) -> String {
         .iter()
         .map(|item| format!("{}{}", item.name, item.joinphrase))
         .collect::<String>()
+}
+
+fn artist_ids(credit: &[ArtistCredit]) -> Vec<String> {
+    credit
+        .iter()
+        .filter_map(|item| item.artist.as_ref()?.id.clone())
+        .collect()
 }
 
 fn candidate(release: MbRelease) -> ReleaseCandidate {
@@ -112,10 +153,38 @@ fn candidate(release: MbRelease) -> ReleaseCandidate {
 }
 
 fn details(release: MbRelease) -> ReleaseDetails {
+    let release_artist = artist_credit(&release.artist_credit);
+    let release_artist_ids = artist_ids(&release.artist_credit);
+    let release_group_id = release
+        .release_group
+        .as_ref()
+        .and_then(|group| group.id.clone());
+    let original_year = release
+        .release_group
+        .as_ref()
+        .and_then(|group| group.first_release_date.as_deref())
+        .and_then(|date| date.get(..4))
+        .map(str::to_string);
+    let label = release
+        .label_info
+        .iter()
+        .filter_map(|info| info.label.as_ref()?.name.clone())
+        .collect::<Vec<_>>();
+    let catalog_number = release
+        .label_info
+        .iter()
+        .filter_map(|info| info.catalog_number.clone())
+        .collect::<Vec<_>>();
     ReleaseDetails {
         id: release.id,
         title: release.title,
-        artist_credit: artist_credit(&release.artist_credit),
+        artist_credit: release_artist.clone(),
+        artist_ids: release_artist_ids,
+        date: release.date,
+        original_year,
+        release_group_id,
+        label: (!label.is_empty()).then(|| label.join("; ")),
+        catalog_number: (!catalog_number.is_empty()).then(|| catalog_number.join("; ")),
         media: release
             .media
             .into_iter()
@@ -127,12 +196,39 @@ fn details(release: MbRelease) -> ReleaseDetails {
                 tracks: medium
                     .tracks
                     .into_iter()
-                    .map(|track| TrackInfo {
-                        position: track.position,
-                        number: track.number,
-                        title: track.title,
-                        length_ms: track.length,
-                        recording_id: track.recording.and_then(|recording| recording.id),
+                    .map(|track| {
+                        let recording_id = track
+                            .recording
+                            .as_ref()
+                            .and_then(|recording| recording.id.clone());
+                        let track_credit = if track.artist_credit.is_empty() {
+                            track
+                                .recording
+                                .as_ref()
+                                .map(|recording| recording.artist_credit.as_slice())
+                                .unwrap_or_default()
+                        } else {
+                            track.artist_credit.as_slice()
+                        };
+                        let resolved_credit = artist_credit(track_credit);
+                        TrackInfo {
+                            id: track.id,
+                            position: track.position,
+                            number: track.number,
+                            title: track.title,
+                            length_ms: track.length,
+                            recording_id,
+                            artist_credit: if resolved_credit.is_empty() {
+                                release_artist.clone()
+                            } else {
+                                resolved_credit
+                            },
+                            artist_ids: if track_credit.is_empty() {
+                                Vec::new()
+                            } else {
+                                artist_ids(track_credit)
+                            },
+                        }
                     })
                     .collect(),
             })
@@ -178,7 +274,10 @@ impl MusicBrainzClient {
         let contact = option_env!("MUSIC_CHAPTER_EDITOR_CONTACT")
             .unwrap_or("app.musicchaptereditor.desktop; local open-source beta");
         let client = Client::builder()
-            .user_agent(format!("MusicChapterEditor/0.1.0 ({contact})"))
+            .user_agent(format!(
+                "MusicChapterEditor/{} ({contact})",
+                env!("CARGO_PKG_VERSION")
+            ))
             .timeout(Duration::from_secs(20))
             .build()
             .map_err(|error| error.to_string())?;
@@ -305,7 +404,10 @@ impl MusicBrainzClient {
     ) -> Result<MbRelease, String> {
         let mut url = Url::parse(&format!("https://musicbrainz.org/ws/2/release/{id}")).unwrap();
         url.query_pairs_mut()
-            .append_pair("inc", "recordings+artist-credits+release-groups+media")
+            .append_pair(
+                "inc",
+                "recordings+artist-credits+release-groups+media+labels",
+            )
             .append_pair("fmt", "json");
         self.get_json(app, url, refresh).await
     }
@@ -348,10 +450,12 @@ mod tests {
               "country":"GB",
               "status":"Official",
               "score":97,
-              "artist-credit":[{"name":"Artist A","joinphrase":" & "},{"name":"Artist B","joinphrase":""}],
+              "artist-credit":[{"name":"Artist A","joinphrase":" & ","artist":{"id":"artist-a"}},{"name":"Artist B","joinphrase":"","artist":{"id":"artist-b"}}],
+              "release-group":{"id":"release-group-1","first-release-date":"1999-03-02"},
+              "label-info":[{"catalog-number":"CAT 123","label":{"id":"label-1","name":"Example Label"}}],
               "media":[
                 {"id":"disc-1","position":1,"format":"Blu-ray","track-count":2,"tracks":[
-                  {"position":1,"number":"1","title":"Intro","length":61000,"recording":{"id":"recording-1"}},
+                  {"id":"track-1","position":1,"number":"1","title":"Intro","length":61000,"recording":{"id":"recording-1","artist-credit":[{"name":"Guest","joinphrase":"","artist":{"id":"guest-id"}}]}},
                   {"position":2,"number":"2","title":"Song","length":240000,"recording":{"id":"recording-2"}}
                 ]},
                 {"id":"disc-2","position":2,"title":"Encore","format":"DVD","track-count":1,"tracks":[
@@ -369,6 +473,13 @@ mod tests {
 
         let loaded = details(release);
         assert_eq!(loaded.media[0].tracks[1].title, "Song");
+        assert_eq!(loaded.date.as_deref(), Some("2025-01-02"));
+        assert_eq!(loaded.original_year.as_deref(), Some("1999"));
+        assert_eq!(loaded.label.as_deref(), Some("Example Label"));
+        assert_eq!(loaded.catalog_number.as_deref(), Some("CAT 123"));
+        assert_eq!(loaded.artist_ids, ["artist-a", "artist-b"]);
+        assert_eq!(loaded.media[0].tracks[0].id.as_deref(), Some("track-1"));
+        assert_eq!(loaded.media[0].tracks[0].artist_credit, "Guest");
         assert_eq!(
             loaded.media[0].tracks[0].recording_id.as_deref(),
             Some("recording-1")

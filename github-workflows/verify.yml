@@ -21,5 +21,6 @@ jobs:
       - run: pnpm check
       - run: pnpm test
       - run: pnpm build
+      - run: bash scripts/verify-release-version.sh
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo check --manifest-path src-tauri/Cargo.toml

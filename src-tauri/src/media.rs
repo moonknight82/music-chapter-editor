@@ -139,5 +139,6 @@ pub fn open_document(path: &Path, tools: &ToolPaths) -> Result<ChapterDocument, 
         original_xml,
         inferred_artist,
         inferred_release,
+        musicbrainz_selection: None,
     })
 }
